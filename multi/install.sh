@@ -11,6 +11,7 @@ GATEWAY_DOMAIN="coder.thinkers.top"   # 共用域名入口
 RUN_USER="coder"                       # 运行服务的基础系统用户
 BASE_DIR="/srv/coder"                  # 用户数据根
 GATEWAY_ADDR=":8080"                   # 门卫监听
+SKIP_CADDY="${SKIP_CADDY:-0}"          # 1=跳过 Caddy（家庭自建 + CF Tunnel 时用）
 # ────────────────────────────────────────────────────────────────
 
 set -euo pipefail
@@ -68,22 +69,27 @@ EOF
 $SUDO systemctl daemon-reload
 $SUDO systemctl enable --now coder-gateway
 
-log "7/8 安装 Caddy（自动 HTTPS）"
-$SUDO apt-get install -y debian-keyring debian-archive-keyring apt-transport-https
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
-  | $SUDO gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
-  | $SUDO tee /etc/apt/sources.list.d/caddy-stable.list
-$SUDO apt-get update -y && $SUDO apt-get install -y caddy
+if [ "$SKIP_CADDY" = "1" ]; then
+  log "7/8 跳过 Caddy（家庭自建 + Cloudflare Tunnel，由 Tunnel 处理 HTTPS）"
+  log "8/8 跳过 Caddy 反代"
+else
+  log "7/8 安装 Caddy（自动 HTTPS）"
+  $SUDO apt-get install -y debian-keyring debian-archive-keyring apt-transport-https
+  curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
+    | $SUDO gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+  curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
+    | $SUDO tee /etc/apt/sources.list.d/caddy-stable.list
+  $SUDO apt-get update -y && $SUDO apt-get install -y caddy
 
-log "8/8 Caddy 反向代理到门卫"
-$SUDO tee /etc/caddy/Caddyfile >/dev/null <<EOF
+  log "8/8 Caddy 反向代理到门卫"
+  $SUDO tee /etc/caddy/Caddyfile >/dev/null <<EOF
 ${GATEWAY_DOMAIN} {
     reverse_proxy localhost:${GATEWAY_ADDR#:}
 }
 EOF
-$SUDO systemctl enable --now caddy
-$SUDO systemctl reload caddy
+  $SUDO systemctl enable --now caddy
+  $SUDO systemctl reload caddy
+fi
 
 log "安装用户管理命令 coder-admin（含 _users.py 助手）"
 $SUDO install -m 755 "$(dirname "$0")/coder-admin" /usr/local/bin/coder-admin
@@ -101,7 +107,21 @@ cat <<EOF
     coder-admin list         # 查看用户
     coder-admin del alice    # 离职：禁用 + 归档
 
+EOF
+if [ "$SKIP_CADDY" = "1" ]; then
+  cat <<EOF
+  ⚠️ 本次跳过了 Caddy。家庭自建请继续配 Cloudflare Tunnel：
+    见 multi/家庭自建方案.md → 第五节（搭 CF Tunnel）
+    Tunnel 目标设为 http://localhost:${GATEWAY_ADDR#:}
+
+EOF
+else
+  cat <<EOF
   记得在 DNS 把 ${GATEWAY_DOMAIN} 的 A 记录指到本服务器。
+
+EOF
+fi
+cat <<EOF
   建议配置归档清理定时任务：crontab 里加
     0 3 * * *  coder-admin purge
 ────────────────────────────────────────────────
