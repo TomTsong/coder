@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+# ════════════════════════════════════════════════════════════════
+#  coder-admin：多用户版用户管理命令
+#
+#  用法：
+#    coder-admin add    <用户名>  入职：建隔离环境 + 随机初始密码
+#    coder-admin del    <用户名>  离职：立即禁用 + 归档（7天后清理）
+#    coder-admin list            列出所有用户（在职/禁用/待清理）
+#    coder-admin passwd <用户名>  重置密码
+#    coder-admin purge            清理过期归档（>7天，供 cron/timer 调用）
+#
+#  隔离模型（软隔离，适配内部员工）：
+#    - 每用户独立 tmux socket（tmux -L <用户>），互不可见
+#    - 每用户独立 HOME / 工作目录  /srv/coder/<用户>/
+#    - 每用户独立 ttyd 实例（内网端口）
+#
+#  路径支持用 CODER_BASE_DIR 覆盖（便于测试/自定义部署）。
+# ════════════════════════════════════════════════════════════════
+
+set -euo pipefail
+
+# ── 配置 ────────────────────────────────────────────────────────
+BASE_DIR="${CODER_BASE_DIR:-/srv/coder}"   # 用户数据根
+USERS_DB="$BASE_DIR/users.db"              # 用户表（与门卫服务共享）
+ARCHIVE_DIR="$BASE_DIR/archive"            # 离职归档目录
+PORT_BASE=7001                             # ttyd 内网端口起始
+ARCHIVE_DAYS=7                             # 归档保留天数
+RUN_USER="${CODER_RUN_USER:-coder}"        # 服务运行系统用户
+SYSTEMD_DIR="/etc/systemd/system"          # systemd unit 目录
+PY="python3"
+# 助手脚本与 coder-admin 同目录
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HELPER="$SELF_DIR/_users.py"
+
+# ── 工具：生成 bcrypt 哈希 ──────────────────────────────────────
+hash_password() {
+  local plain="$1"
+  if command -v htpasswd >/dev/null 2>&1; then
+    htpasswd -bnBC 10 "" "$plain" | tr -d ':\n'
+  elif "$PY" -c 'import bcrypt' 2>/dev/null; then
+    "$PY" -c 'import bcrypt,sys; print(bcrypt.hashpw(sys.argv[1].encode(), bcrypt.gensalt(10)).decode())' "$plain"
+  else
+    echo "✗ 需要 htpasswd（apache2-utils）或 python3-bcrypt" >&2
+    exit 1
+  fi
+}
+
+# ── 工具：随机密码 ──────────────────────────────────────────────
+random_pass() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 16
+  else
+    head -c 16 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 16
+  fi
+}
+
+# ── 工具：确保 users.db 存在 ────────────────────────────────────
+ensure_db() {
+  mkdir -p "$BASE_DIR"
+  if [ ! -f "$USERS_DB" ]; then
+    echo '{"users":[]}' > "$USERS_DB"
+    chmod 600 "$USERS_DB"
+  fi
+}
+
+user_exists()   { "$PY" "$HELPER" exists   "$USERS_DB" "$1"; }
+next_port()     { "$PY" "$HELPER" nextport "$USERS_DB" "$PORT_BASE"; }
+
+# ────────────────────────────────────────────────────────────────
+# 子命令实现
+# ────────────────────────────────────────────────────────────────
+
+cmd_add() {
+  local name="$1"
+  [ -z "$name" ] && { echo "用法：coder-admin add <用户名>"; exit 1; }
+  ensure_db
+  [ "$(user_exists "$name")" = "True" ] && { echo "✗ 用户「${name}」已存在"; exit 1; }
+
+  local pass hash port home
+  pass="$(random_pass)"
+  hash="$(hash_password "$pass")"
+  port="$(next_port)"
+
+  "$PY" "$HELPER" add "$USERS_DB" "$name" "$hash" "$port"
+
+  home="$BASE_DIR/$name"
+  mkdir -p "$home/workdir"
+  [ "$(id -u)" -eq 0 ] && chown -R "$RUN_USER:$RUN_USER" "$home" 2>/dev/null || true
+
+  # 启动该用户的 ttyd 实例（仅在 root + 有 systemd 环境时）
+  if [ "$(id -u)" -eq 0 ] && [ -d "$SYSTEMD_DIR" ]; then
+    cat > "$SYSTEMD_DIR/coder-ttyd-$name.service" <<EOF
+[Unit]
+Description=coder ttyd for $name
+After=network.target
+
+[Service]
+User=$RUN_USER
+Environment=HOME=$home
+ExecStart=/usr/local/bin/ttyd -p $port --writable bash -lc 'cd $home/workdir; exec bash'
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable --now "coder-ttyd-$name.service" >/dev/null 2>&1 || true
+  fi
+
+  echo "✅ 用户「${name}」创建成功"
+  echo "   内网端口：${port}"
+  echo "   初始密码：${pass}   ← 请立即告知本人，首次登录后建议修改"
+}
+
+cmd_del() {
+  local name="$1"
+  [ -z "$name" ] && { echo "用法：coder-admin del <用户名>"; exit 1; }
+  ensure_db
+  [ "$(user_exists "$name")" != "True" ] && { echo "✗ 用户「${name}」不存在"; exit 1; }
+
+  local ts stamp dest
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  # 1. 立即禁用 + 记录归档时间
+  "$PY" "$HELPER" disable "$USERS_DB" "$name" "$ts"
+
+  systemctl stop "coder-ttyd-$name.service" 2>/dev/null || true
+  systemctl disable "coder-ttyd-$name.service" 2>/dev/null || true
+
+  # 2. 归档数据
+  mkdir -p "$ARCHIVE_DIR"
+  stamp="$(date +%Y%m%d%H%M%S)"
+  dest="$ARCHIVE_DIR/$name-$stamp"
+  if [ -d "$BASE_DIR/$name" ]; then
+    mv "$BASE_DIR/$name" "$dest"
+    echo "   数据已归档到：${dest}"
+  fi
+
+  echo "✅ 用户「${name}」已禁用并归档"
+  echo "   归档保留 $ARCHIVE_DAYS 天后由 coder-admin purge 自动清理"
+}
+
+cmd_list() {
+  ensure_db
+  "$PY" "$HELPER" list "$USERS_DB"
+}
+
+cmd_passwd() {
+  local name="$1"
+  [ -z "$name" ] && { echo "用法：coder-admin passwd <用户名>"; exit 1; }
+  ensure_db
+  [ "$(user_exists "$name")" != "True" ] && { echo "✗ 用户「${name}」不存在"; exit 1; }
+
+  local pass hash
+  pass="$(random_pass)"
+  hash="$(hash_password "$pass")"
+
+  "$PY" "$HELPER" passwd "$USERS_DB" "$name" "$hash"
+
+  echo "✅ 已重置「${name}」密码：${pass}"
+}
+
+cmd_purge() {
+  ensure_db
+  [ -d "$ARCHIVE_DIR" ] || { echo "（无归档目录，无需清理）"; return; }
+  echo "清理超过 $ARCHIVE_DAYS 天的归档…"
+  find "$ARCHIVE_DIR" -mindepth 1 -maxdepth 1 -type d -mtime +$ARCHIVE_DAYS -print -exec rm -rf {} \;
+  echo "✅ 归档清理完成"
+}
+
+# ── 主入口 ──────────────────────────────────────────────────────
+case "${1:-}" in
+  add)    cmd_add    "${2:-}" ;;
+  del)    cmd_del    "${2:-}" ;;
+  list)   cmd_list ;;
+  passwd) cmd_passwd "${2:-}" ;;
+  purge)  cmd_purge ;;
+  *)
+    echo "用法："
+    echo "  coder-admin add    <用户名>   入职创建账号"
+    echo "  coder-admin del    <用户名>   离职禁用+归档"
+    echo "  coder-admin list             查看全部用户"
+    echo "  coder-admin passwd <用户名>   重置密码"
+    echo "  coder-admin purge             清理过期归档"
+    ;;
+esac
