@@ -6,6 +6,25 @@
 - 多会话并发 + 菜单式管理
 - iOS / Android / 鸿蒙 三端可用（固定域名入口）
 
+## 架构
+
+```
+                         香港云服务器（腾讯云轻量 · Ubuntu 24.04）
+                         ┌──────────────────────────────────────────────┐
+ iOS / Android            │  tmux 会话 ai1 ──── Claude Code (DeepSeek)   │
+   （mosh 协议） ──────────┼▶ tmux 会话 ai2 ──── Claude Code (DeepSeek)   │
+                         │  tmux 会话 aiN ──── Claude Code (DeepSeek)   │
+                         │                                              │
+ 鸿蒙 / 临时设备          │  ttyd 网页终端 ── Caddy(HTTPS, Basic Auth)     │
+   （浏览器 HTTPS） ───────┼▶ code.thinkers.top                           │
+                         └──────────────────────────────────────────────┘
+                         ▲
+                         └─ 你的 Mac：bash deploy.sh（读 deploy.local.sh）
+```
+
+- **会话状态** 与 **网络连接** 彻底解耦：代码、Claude 进程、对话历史全在服务器，断线后重连即恢复。
+- **三端殊途同归**：iOS/Android 走 mosh，鸿蒙走网页终端，最终都落进同一个 tmux 会话。
+
 ## 文件组成
 
 | 文件 | 作用 | 运行位置 |
