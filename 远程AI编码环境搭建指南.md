@@ -31,12 +31,17 @@
 ### 部署流程（三步）
 
 ```bash
-# 1. 编辑 deploy.sh 顶部，填 SERVER_IP（服务器公网 IP）
+# 1. 生成本地配置并填入服务器信息（deploy.local.sh 已被 .gitignore 忽略，不提交）
+cp deploy.local.sh.example deploy.local.sh
+vim deploy.local.sh          # 填 SERVER_IP / SERVER_USER / SSH_PORT
+
 # 2. 执行（会交互式提示输入网页终端密码，输入不回显、二次确认）
 bash deploy.sh
 ```
 
-`deploy.sh` 会自动完成：上传 → 执行 `setup.sh` → 配置 `ac` → 清理临时文件。
+`deploy.sh` 会自动完成：读取 `deploy.local.sh` → 上传 → 执行 `setup.sh` → 配置 `ac` → 清理临时文件。
+
+> 服务器 IP、用户名、SSH 端口等私密信息放在 `deploy.local.sh`（不进 git），`deploy.sh` 本体不含任何真实 IP，可安全公开。
 
 ### 关于密码（不落盘设计）
 

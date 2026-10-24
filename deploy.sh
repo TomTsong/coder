@@ -6,19 +6,34 @@
 # ════════════════════════════════════════════════════════════════
 
 # ────────────────────────────────────────────────────────────────
-#  配置项（本地：只改这里）
-# ────────────────────────────────────────────────────────────────
-SERVER_IP="你的服务器公网IP"           # 例如 1.2.3.4
-SERVER_USER="ubuntu"                  # 例如 ubuntu 或 root
-SSH_PORT="22"                         # SSH 端口
+#  配置项已抽到 deploy.local.sh（被 .gitignore 忽略，不提交）
+#  deploy.local.sh 应定义：SERVER_IP / SERVER_USER / SSH_PORT
 # ────────────────────────────────────────────────────────────────
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TARGET="${SERVER_USER}@${SERVER_IP}"
+CONFIG_FILE="$SCRIPT_DIR/deploy.local.sh"
 
 log() { echo -e "\n\033[1;34m➜\033[0m $*"; }
+
+# 加载本地配置（含服务器 IP 等敏感/私密信息）
+if [ ! -f "$CONFIG_FILE" ]; then
+  echo "✗ 缺少配置文件 deploy.local.sh"
+  echo "  请复制模板生成："
+  echo "    cp deploy.local.sh.example deploy.local.sh"
+  echo "  然后编辑 deploy.local.sh，填入真实服务器信息。"
+  exit 1
+fi
+# shellcheck disable=SC1090
+source "$CONFIG_FILE"
+
+# 读取配置后校验必填项
+: "${SERVER_IP:?请在 deploy.local.sh 里设置 SERVER_IP}"
+: "${SERVER_USER:?请在 deploy.local.sh 里设置 SERVER_USER}"
+: "${SSH_PORT:?请在 deploy.local.sh 里设置 SSH_PORT}"
+
+TARGET="${SERVER_USER}@${SERVER_IP}"
 
 # ── 交互式输入密码（不落盘、不进 git）──────────────────────────
 read_password() {
@@ -35,12 +50,7 @@ read_password() {
   done
 }
 
-# 校验配置
-if [ "$SERVER_IP" = "你的服务器公网IP" ]; then
-  echo "✗ 请先编辑 deploy.sh 顶部的 SERVER_IP（填入真实 IP）"
-  exit 1
-fi
-
+# 校验依赖文件齐全
 if [ ! -f "$SCRIPT_DIR/setup.sh" ] || [ ! -f "$SCRIPT_DIR/ac" ]; then
   echo "✗ 缺少 setup.sh 或 ac，请与 deploy.sh 放在同一目录"
   exit 1
