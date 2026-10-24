@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# ════════════════════════════════════════════════════════════════
+#  ac：AI 编码会话管理菜单（上传到服务器 ~/bin/ac，chmod +x）
+#  新建 / 继续 / 恢复历史 / 关闭 / 查看，交互式菜单选数字
+#  会话名 <-> Claude conversation 历史，由 Claude Code 自身持久化
+# ════════════════════════════════════════════════════════════════
+
+MAPFILE="$HOME/.ac_sessions"
+
+# ── 工具：列出会话 ──────────────────────────────────────────────
+list_sessions() {
+  printf '\n===== 运行中的 tmux 会话 =====\n'
+  if tmux ls >/dev/null 2>&1; then
+    tmux ls
+  else
+    printf '  （无运行中的会话）\n'
+  fi
+  printf '\n===== 会话映射记录 =====\n'
+  if [ -f "$MAPFILE" ]; then
+    cat "$MAPFILE"
+  else
+    printf '  （暂无记录）\n'
+  fi
+}
+
+# ── 工具：新建会话（全新 Claude 对话）───────────────────────────
+new_session() {
+  printf '\n【新建会话】\n'
+  read -r -p "  新会话名（如 projectA）：" name
+  [ -z "$name" ] && { echo "  ✗ 名字不能为空"; return; }
+  if tmux has-session -t "$name" 2>/dev/null; then
+    echo "  ✗ 会话「$name」已存在，请换名或先关闭"
+    return
+  fi
+  tmux new -d -s "$name"
+  tmux send-keys -t "$name" "cd ~ && clear && claude" Enter
+  echo "  ✓ 已创建会话「$name」并启动全新 Claude 对话"
+  echo "  进入： tmux attach -t $name"
+}
+
+# ── 工具：继续某个运行中的会话 ──────────────────────────────────
+attach_session() {
+  read -r -p "会话名：" n
+  if tmux has-session -t "$n" 2>/dev/null; then
+    tmux attach -t "$n"
+  else
+    echo "  ✗ 无运行中的会话「$n」，可试试「恢复历史会话」"
+  fi
+}
+
+# ── 工具：恢复历史会话（tmux 已关，但 Claude 历史仍在）─────────
+resume_session() {
+  printf '\n【恢复历史会话】\n'
+  printf '  说明：即使 tmux 会话已关，Claude 对话历史仍保留在服务器。\n\n'
+  read -r -p "  会话名（会重建 tmux 并 resume）：" name
+  [ -z "$name" ] && { echo "  ✗ 名字不能为空"; return; }
+  if tmux has-session -t "$name" 2>/dev/null; then
+    echo "  「$name」仍在运行，直接进入…"
+    tmux attach -t "$name"
+    return
+  fi
+  tmux new -d -s "$name"
+  tmux send-keys -t "$name" "cd ~ && clear && claude --resume" Enter
+  echo "  ✓ 已重建「$name」，进入后 claude --resume 会列出历史会话供选择"
+  tmux attach -t "$name"
+}
+
+# ── 工具：关闭会话（退出 claude + 关闭 tmux）────────────────────
+stop_session() {
+  printf '\n【关闭会话】\n'
+  read -r -p "  要关闭的会话名：" name
+  if tmux has-session -t "$name" 2>/dev/null; then
+    tmux send-keys -t "$name" "/quit" Enter
+    sleep 1
+    tmux kill-session -t "$name"
+    echo "  ✓ 已关闭「$name」（其 Claude 对话历史仍保留，可用 resume 找回）"
+  else
+    echo "  ✗ 无运行中的会话「$name」"
+  fi
+}
+
+# ── 主菜单 ──────────────────────────────────────────────────────
+echo "======================================="
+echo "   AI 编码会话管理"
+echo "======================================="
+echo "   1. 新建会话（新 Claude 对话）"
+echo "   2. 继续 / 进入某个会话"
+echo "   3. 恢复历史会话（claude --resume）"
+echo "   4. 关闭会话（退出 Claude）"
+echo "   5. 查看所有会话"
+echo "   0. 退出"
+echo "---------------------------------------"
+read -r -p "  请选择 [0-5]：" choice
+
+case "$choice" in
+  1) new_session ;;
+  2) attach_session ;;
+  3) resume_session ;;
+  4) stop_session ;;
+  5) list_sessions ;;
+  0) exit 0 ;;
+  *) echo "无效选择" ;;
+esac

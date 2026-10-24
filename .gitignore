@@ -1,0 +1,8 @@
+# 敏感/本地文件 — 防止误提交
+.env
+.env.*
+*.local
+secrets*
+*.pem
+*.key
+id_rsa*
